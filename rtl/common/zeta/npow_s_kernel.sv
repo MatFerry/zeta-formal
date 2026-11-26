@@ -152,8 +152,11 @@ module npow_s_kernel #(
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
-      state     <= IDLE;
-      out_valid <= 1'b0;
+      state       <= IDLE;
+      out_valid   <= 1'b0;
+      exp_launch  <= 1'b0;
+      cexp_launch <= 1'b0;
+      mul_launch  <= 1'b0;
     end else begin
       out_valid   <= 1'b0;
       exp_launch  <= 1'b0;

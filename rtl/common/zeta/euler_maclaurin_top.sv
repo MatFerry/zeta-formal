@@ -109,6 +109,7 @@ module euler_maclaurin_top #(
   logic [MPW-1:0] np_sigma, np_re, np_im;
   logic [LNW-1:0] lnn_q;
   logic [BW+7:0] lnn2pi_q;
+  logic [63:0] t_fx_q;
   logic np_ovf, np_unf;
 
   npow_s_kernel #(
@@ -169,7 +170,6 @@ module euler_maclaurin_top #(
   // configuration
   logic ps_q;
   logic [MPW-1:0] sigma_q, t_mpf_q, inv_re_q, inv_im_q, invnp2_q, sigma1_q, c2r_q;
-  logic [63:0] t_fx_q;
   logic [23:0] n_q, n_ctr;
   logic [11:0] m_q, j_ctr;
 
@@ -186,6 +186,9 @@ module euler_maclaurin_top #(
     if (!rst_n) begin
       state     <= IDLE;
       out_valid <= 1'b0;
+      np_go     <= 1'b0;
+      mul_go    <= 1'b0;
+      add_go    <= 1'b0;
     end else begin
       out_valid <= 1'b0;
       np_go     <= 1'b0;
