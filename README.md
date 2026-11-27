@@ -1,7 +1,7 @@
 # fpga-zeta
 
 Hardware-optimized, parametric SystemVerilog libraries to compute Riemann-zeta-related
-functions on FPGAs, driven by a host CPU over PCIe.
+functions driven by a host CPU over PCIe.
 
 - **Phase 1**: full pipeline computing ζ(s) for any complex s (Euler–Maclaurin engine),
   developed simulation-first (Verilator + cocotb) with bit-true Python golden models
