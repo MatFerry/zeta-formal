@@ -1,0 +1,54 @@
+# Open-source pre-check of the JasperGold "mag" cases at Z64, EPS_EXP = -16.
+# Needs SymbiYosys, Yosys with the slang plugin, Bitwuzla and ABC (OSS CAD Suite).
+# From the repository root:
+#
+#   sby -f --prefix sim_build/zeta_compositional/sby/mag formal/em_compositional/mag/mag_equiv.sby
+#
+#   norm        both assertions hold for normalized mantissas
+#   unnorm      ap_checker_never_optimistic holds for every mantissa
+#   unnorm_cex  ap_checker_matches_reference fails for some unnormalized mantissa
+#   cover       the three cover properties are reachable with normalized mantissas
+#   cut_norm    as norm, with both mantissa squares replaced by free values
+#   cut_unnorm  as unnorm, with both mantissa squares replaced by free values
+#
+# The logic is combinational. The properties are sampled on posedge clk, so the
+# first check happens in step 1 and depth 2 covers every input.
+#
+# The checker and the reference compute mantissa*mantissa with the same
+# expression, and Yosys merges the two multipliers per component. The cut tasks
+# show that neither assertion depends on the value of the squares: a bit-level
+# engine proves them in seconds once the two shared multipliers are cut, and
+# times out with the multipliers in the cone.
+[tasks]
+norm normalized proof word
+unnorm unrestricted proof word oneway
+unnorm_cex unrestricted word
+cover normalized word
+cut_norm normalized proof cut
+cut_unnorm unrestricted proof cut oneway
+
+[options]
+proof: mode prove
+unnorm_cex: mode bmc
+unnorm_cex: expect fail
+cover: mode cover
+depth 2
+
+[engines]
+word: smtbmc bitwuzla
+cut: abc pdr
+
+[script]
+plugin -i slang
+normalized: read_slang --top mag_equiv -DZETA_MAG_ASSUME_NORMALIZED=1 mpf_magnitude.sv mag_equiv.sv
+unrestricted: read_slang --top mag_equiv -DZETA_MAG_ASSUME_NORMALIZED=0 mpf_magnitude.sv mag_equiv.sv
+prep -top mag_equiv
+oneway: delete c:ap_checker_matches_reference
+unnorm_cex: delete c:ap_checker_never_optimistic
+cut: opt_merge
+cut: select -assert-count 2 t:$mul r:Y_WIDTH=128 %i
+cut: cutpoint t:$mul r:Y_WIDTH=128 %i
+
+[files]
+formal/euler_maclaurin/mpf_magnitude.sv
+formal/em_compositional/mag/mag_equiv.sv

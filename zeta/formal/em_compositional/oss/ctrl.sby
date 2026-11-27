@@ -1,0 +1,41 @@
+# Controller proof of formal/em_compositional/ctrl with open-source tools.
+# Run through run.sh from the repository root: it rewrites the properties first.
+[tasks]
+kind     # k-induction on every assertion, about a second
+cover    # the four covers; the deepest needs 169 steps, about nine minutes
+
+[options]
+kind: mode prove
+kind: depth 3
+cover: mode cover
+cover: depth 175
+
+[engines]
+kind: smtbmc --keep-going bitwuzla
+cover: smtbmc bitwuzla
+
+[script]
+plugin -i slang
+read_slang --top em_ctrl_top -D OSS_TOP=em_ctrl_top --blackboxed-module npow_s_kernel --blackboxed-module mpf_mul --blackboxed-module mpf_add lzc.sv skid_buffer.sv mul_tile.sv limb_mul.sv limb_shift.sv limb_addsub.sv mpf_mul.sv mpf_add.sv fx_mul_mod1.sv exp_mpf.sv cexp_turns.sv npow_s_kernel.sv euler_maclaurin_top.sv em_ctrl_checker.sv em_ctrl_top.sv oss_reset.sv
+hierarchy -top em_ctrl_top
+# The unit outputs are free, as with "elaborate -bbox_m" in run.tcl.
+cutpoint -blackbox
+prep -top em_ctrl_top
+
+[files]
+rtl/common/prim/lzc.sv
+rtl/common/prim/skid_buffer.sv
+rtl/arch/generic-sim/mul_tile.sv
+rtl/common/mp/limb_mul.sv
+rtl/common/mp/limb_shift.sv
+rtl/common/mp/limb_addsub.sv
+rtl/common/mp/mpf_mul.sv
+rtl/common/mp/mpf_add.sv
+rtl/common/fx/fx_mul_mod1.sv
+rtl/common/fn/exp_mpf.sv
+rtl/common/fn/cexp_turns.sv
+rtl/common/zeta/npow_s_kernel.sv
+rtl/common/zeta/euler_maclaurin_top.sv
+sim_build/zeta_oss/src/em_ctrl_checker.sv
+sim_build/zeta_oss/src/em_ctrl_top.sv
+sim_build/zeta_oss/src/oss_reset.sv

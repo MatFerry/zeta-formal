@@ -1,0 +1,52 @@
+# Unit handshake contracts of formal/em_compositional/units on the real RTL.
+# Run through run.sh from the repository root (it rewrites the properties first).
+[tasks]
+# ap_done_in_flight of mpf_mul and mpf_add is not k-inductive (a stray valid
+# bit in the pipeline can be chased forever), so those two use PDR only.
+mul_pdr mul pdr
+mul_cover mul cover
+add_pdr add pdr
+add_cover add cover
+npow_pdr npow pdr
+npow_kind npow kind
+npow_cover npow cover
+
+[options]
+pdr: mode prove
+kind: mode prove
+kind: depth 12
+cover: mode cover
+cover: depth 40
+
+[engines]
+pdr: abc pdr
+kind: smtbmc --keep-going bitwuzla
+cover: smtbmc bitwuzla
+
+[script]
+plugin -i slang
+mul: read_slang --top em_unit_mul_top -D OSS_TOP=em_unit_mul_top lzc.sv skid_buffer.sv mul_tile.sv limb_mul.sv limb_shift.sv limb_addsub.sv mpf_mul.sv mpf_add.sv fx_mul_mod1.sv exp_mpf.sv cexp_turns.sv npow_s_kernel.sv em_unit_contract.sv oss_reset.sv
+add: read_slang --top em_unit_add_top -D OSS_TOP=em_unit_add_top lzc.sv skid_buffer.sv mul_tile.sv limb_mul.sv limb_shift.sv limb_addsub.sv mpf_mul.sv mpf_add.sv fx_mul_mod1.sv exp_mpf.sv cexp_turns.sv npow_s_kernel.sv em_unit_contract.sv oss_reset.sv
+npow: read_slang --top em_unit_npow_top -D OSS_TOP=em_unit_npow_top lzc.sv skid_buffer.sv mul_tile.sv limb_mul.sv limb_shift.sv limb_addsub.sv mpf_mul.sv mpf_add.sv fx_mul_mod1.sv exp_mpf.sv cexp_turns.sv npow_s_kernel.sv em_unit_contract.sv oss_reset.sv
+mul: prep -top em_unit_mul_top
+add: prep -top em_unit_add_top
+npow: prep -top em_unit_npow_top
+
+[files]
+rtl/common/prim/lzc.sv
+rtl/common/prim/skid_buffer.sv
+rtl/arch/generic-sim/mul_tile.sv
+rtl/common/mp/limb_mul.sv
+rtl/common/mp/limb_shift.sv
+rtl/common/mp/limb_addsub.sv
+rtl/common/mp/mpf_mul.sv
+rtl/common/mp/mpf_add.sv
+rtl/common/fx/fx_mul_mod1.sv
+rtl/common/fn/exp_mpf.sv
+rtl/common/fn/cexp_turns.sv
+rtl/common/zeta/npow_s_kernel.sv
+sim_build/zeta_oss/src/em_unit_contract.sv
+sim_build/zeta_oss/src/oss_reset.sv
+# The npow top names its ROMs by repository path.
+rtl/common/fn/tables/expln_w64_exp.mem rtl/common/fn/tables/expln_w64_exp.mem
+rtl/common/fn/tables/cexp_w64.mem rtl/common/fn/tables/cexp_w64.mem

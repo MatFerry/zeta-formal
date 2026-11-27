@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest tests
+
+  rtl-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends verilator
+      # -Wno-MULTITOP as in scripts/lint.sh: the filelist is a library with several tops.
+      - run: verilator --lint-only -Wall -Wno-MULTITOP -f rtl/filelists/generic-sim.f
+
+  sim-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends verilator
+      - run: uv sync --dev
+      - run: uv run pytest tb -m "not nightly"
+
+  # ---- fork additions: formal/ ------------------------------------------------
+  # The python job above already covers formal/*.py once pyproject.toml lists
+  # formal/ for ruff and mypy, and runs tests/test_formal_scripts.py.
+  #
+  # UNVERIFIED (written without network access): the action name and version
+  # YosysHQ/setup-oss-cad-suite@v3, and the elan installer URL. The commands
+  # themselves were run locally with OSS CAD Suite (Verilator 5.051, slang 11)
+  # and Lean 4.36.0.
+
+  formal-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: YosysHQ/setup-oss-cad-suite@v3
+      - run: verilator --version && slang --version
+      - run: ./scripts/formal_lint.sh all
+
+  # Open-source proofs of the controller, unit and magnitude cases (about 90 s).
+  formal-oss:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: YosysHQ/setup-oss-cad-suite@v3
+      - run: sh formal/em_compositional/oss/run.sh
+      - run: sby -f --prefix sim_build/zeta_compositional/sby/mag formal/em_compositional/mag/mag_equiv.sby
+
+  formal-replay:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: YosysHQ/setup-oss-cad-suite@v3
+      - run: uv sync --dev
+      - run: uv run python formal/euler_maclaurin/gen_tables.py
+      - run: uv run python formal/em_compositional/gen_jobs.py --zeros 1
+      - run: uv run python formal/em_compositional/sim/replay_jobs.py
+      # Randomized initial state: regression for the launch-strobe reset.
+      - run: uv run python formal/em_compositional/sim/replay_jobs.py --seed 1
+      - run: uv run python formal/em_compositional/sim/replay_jobs.py --seed 3
+
+  lean:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan (the toolchain is pinned by lean-toolchain)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: lake build
+        working-directory: formal/em_compositional/lean
+        run: |
+          lean --version
+          lake build
+      - run: sh formal/em_compositional/lean/replay.sh
+
+  tables:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --dev
+      - run: uv run python scripts/gen_tables.py
+      - run: git diff --exit-code -- rtl/common/fn/tables

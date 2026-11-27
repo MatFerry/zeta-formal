@@ -1,0 +1,6 @@
+name = "zeta_magnitude"
+defaultTargets = ["MagnitudeCompare"]
+moreLeanArgs = ["-DwarningAsError=true"]
+
+[[lean_lib]]
+name = "MagnitudeCompare"
