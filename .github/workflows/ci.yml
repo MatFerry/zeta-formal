@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: YosysHQ/setup-oss-cad-suite@c7845bc0d335c8076aa22047e85972caa8a916df # v4
         with:
+          github-token: ${{ github.token }}
           version: '2026-07-11'
       - run: ./scripts/lint.sh --rtl-only
 
@@ -32,6 +33,7 @@ jobs:
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - uses: YosysHQ/setup-oss-cad-suite@c7845bc0d335c8076aa22047e85972caa8a916df # v4
         with:
+          github-token: ${{ github.token }}
           version: '2026-07-11'
       - run: verilator --version
       - run: uv sync --dev
