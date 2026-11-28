@@ -13,6 +13,13 @@ ap_matches_golden, and derives from it the expected outcome of the near-half
 assertion and of its cover, for a window at every sigma of the window.
 --no-golden generates the cases without these checks: their outcomes are
 then only observed.
+
+A fixed sign box samples the four corners and two center-column points near
+an mpmath zero estimate. It checks Re(a * conj(b)) < 0 on both rows and the
+center column. The test is invariant under a common rotation of the results.
+
+--symbolic-box adds a released sign-box case after the fixed boxes. It uses
+the full ROM and leaves the box coordinates to Jasper.
 """
 
 import argparse
@@ -359,6 +366,119 @@ def window_jobs(args: argparse.Namespace, golden: Golden | None) -> list[Job]:
     return jobs
 
 
+def zero_t_below(zero: int) -> int:
+    """Largest Q16.16 grid value of t below the ordinate of the given zero."""
+    try:
+        import mpmath as mp
+    except ImportError:
+        sys.exit("Sign-box cases need mpmath to locate the zeros; pass --box-zeros 0.")
+    with mp.workdps(40):
+        return int(mp.floor(mp.zetazero(zero).imag * (1 << FRAC)))
+
+
+def word_value(word: int) -> Fraction | None:
+    """Exact value of a packed Z64 word, None for a special."""
+    if (word >> 86) & 1:
+        return None
+    mantissa = word & ((1 << 64) - 1)
+    if (word >> 85) & 1 or mantissa == 0:
+        return Fraction(0)
+    exponent = (word >> 64) & 0xFFFFF
+    if exponent >> 19:
+        exponent -= 1 << 20
+    value = Fraction(mantissa) * Fraction(2) ** (exponent - 64)
+    return -value if (word >> 84) & 1 else value
+
+
+def points_opposite(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """Re(a * conj(b)) < 0 for packed (re, im) pairs, as the harness computes it."""
+    values = [word_value(word) for word in (*a, *b)]
+    if any(value is None for value in values):
+        return False
+    a_re, a_im, b_re, b_im = (value for value in values if value is not None)
+    return a_re * b_re + a_im * b_im < 0
+
+
+def box_jobs(args: argparse.Namespace, golden: Golden | None) -> list[Job]:
+    """The grid cell around a zero: four corners and the middle column."""
+    jobs = []
+    limit = tolerance_steps(args.sigma_eps_exp)
+    step = args.box_sigma
+    for zero in range(1, args.box_zeros + 1):
+        t_lo = zero_t_below(zero)
+        t_hi = t_lo + 1
+        corners = [
+            (SIGMA_HALF - step, t_lo),
+            (SIGMA_HALF + step, t_lo),
+            (SIGMA_HALF - step, t_hi),
+            (SIGMA_HALF + step, t_hi),
+            (SIGMA_HALF, t_lo),
+            (SIGMA_HALF, t_hi),
+        ]
+        job = Job(
+            f"box_z{zero:02d}_t{t_lo:06x}_s{step}",
+            "e2e",
+            ZETA_SIGN_BOX="1",
+            ZETA_SIGMA_LO=f"32'h{SIGMA_HALF - step:08x}",
+            ZETA_SIGMA_HI=f"32'h{SIGMA_HALF + step:08x}",
+            ZETA_T_LO=f"32'h{t_lo:08x}",
+            ZETA_T_HI=f"32'h{t_hi:08x}",
+            ZETA_EPS_EXP=str(args.eps_exp),
+            ZETA_EPS_FROM_RE_ONEHALF_EXP=str(args.sigma_eps_exp),
+            **rom_slice(t_hi, args.full_rom),
+        )
+        for prop in E2E_ASSERTS:
+            job.expect(prop, "pass")
+        job.expect("ap_box_six_results", "pass")
+        job.expect("cp_result", "covered").expect("cp_box_done", "covered")
+        if golden is None:
+            for prop in (
+                "cp_small_result",
+                "ap_small_implies_near_half",
+                "ap_opposite_across_sigma",
+                "ap_opposite_across_t",
+            ):
+                job.expect(prop, "observe")
+            jobs.append(job)
+            continue
+        words = [golden(sigma_raw, t_raw) for sigma_raw, t_raw in corners]
+        job.env["ZETA_BOX_EXPECT_RE"] = "522'h" + format(
+            sum(re << (87 * i) for i, (re, _) in enumerate(words)), "0131x"
+        )
+        job.env["ZETA_BOX_EXPECT_IM"] = "522'h" + format(
+            sum(im << (87 * i) for i, (_, im) in enumerate(words)), "0131x"
+        )
+        job.expect("ap_box_matches_golden", "pass")
+        small = [below_eps(re, im, args.eps_exp) for re, im in words]
+        job.expect("cp_small_result", "covered" if any(small) else "uncovered")
+        # Only the corners lie off the line.
+        job.expect(
+            "ap_small_implies_near_half",
+            "cex" if any(small[:4]) and step >= limit else "pass",
+        )
+        across_sigma = points_opposite(words[0], words[1]) and points_opposite(words[2], words[3])
+        job.expect("ap_opposite_across_sigma", "pass" if across_sigma else "cex")
+        job.expect("ap_opposite_across_t", "pass" if points_opposite(words[4], words[5]) else "cex")
+        jobs.append(job)
+    return jobs
+
+
+def symbolic_box_job() -> Job:
+    """Leave the box coordinates symbolic and report the centered assertion's outcome."""
+    job = Job("box_symbolic", "e2e", ZETA_SYMBOLIC_BOX="1")
+    for prop in (
+        *E2E_ASSERTS,
+        "ap_box_six_results",
+        "ap_symbolic_box_request_order",
+        "ap_symbolic_box_completes",
+    ):
+        job.expect(prop, "pass")
+    for prop in ("cp_result", "cp_box_done", "cp_first_zero_box"):
+        job.expect(prop, "covered")
+    job.expect("ap_opposite_box_centered", "observe")
+    return job
+
+
 def check_points() -> None:
     """Recompute ZERO_POINTS from the true zeta function with mpmath."""
     import mpmath as mp
@@ -400,6 +520,18 @@ def main() -> None:
     )
     parser.add_argument("--eps-exp", type=int, default=-16)
     parser.add_argument("--sigma-eps-exp", type=int, default=None, help="defaults to --eps-exp")
+    parser.add_argument(
+        "--box-zeros", type=int, default=1, help="sign-box cases for zeros 1..N (0 for none)"
+    )
+    parser.add_argument(
+        "--box-sigma",
+        type=int,
+        default=1,
+        help="sign-box sigma half width in Q16.16 steps around 1/2",
+    )
+    parser.add_argument(
+        "--symbolic-box", action="store_true", help="add a released sign-box case after fixed boxes"
+    )
     parser.add_argument("--no-golden", action="store_true")
     parser.add_argument(
         "--check-points", action="store_true", help="recompute ZERO_POINTS with mpmath and exit"
@@ -415,6 +547,8 @@ def main() -> None:
         args.sigma_eps_exp = args.eps_exp
     if not (0 <= args.zeros <= 50 and 0 <= args.window_zeros <= 50):
         parser.error("--zeros and --window-zeros must be between 0 and 50")
+    if not 0 <= args.box_zeros <= 50 or not 1 <= args.box_sigma < SIGMA_HALF:
+        parser.error("--box-zeros must be between 0 and 50, --box-sigma between 1 and 32767")
     if not (0 <= args.offsets < SIGMA_HALF and 0 <= args.window < SIGMA_HALF):
         parser.error("--offsets and --window must keep sigma in its legal domain")
     if not all(
@@ -423,9 +557,16 @@ def main() -> None:
         parser.error("threshold exponents must fit a signed 32-bit integer")
 
     # The controller, unit and magnitude cases need no model.
-    needs_model = args.zeros > 0 or args.window_zeros > 0
+    needs_model = args.zeros > 0 or args.window_zeros > 0 or args.box_zeros > 0
     golden = load_golden() if needs_model and not args.no_golden else None
-    jobs = fixed_jobs(args.eps_exp) + point_jobs(args, golden) + window_jobs(args, golden)
+    jobs = (
+        fixed_jobs(args.eps_exp)
+        + point_jobs(args, golden)
+        + window_jobs(args, golden)
+        + box_jobs(args, golden)
+    )
+    if args.symbolic_box:
+        jobs.append(symbolic_box_job())
 
     OUT.mkdir(parents=True, exist_ok=True)
     with (OUT / "jobs.tsv").open("w", encoding="ascii") as out:

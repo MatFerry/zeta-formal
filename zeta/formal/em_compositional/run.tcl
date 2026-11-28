@@ -8,7 +8,7 @@
 #   unit_add   handshake contract of mpf_add
 #   unit_npow  handshake contract of npow_s_kernel
 #   mag        magnitude checker against the exact reference
-#   e2e        full RTL on an input box (one point, a window, or everything)
+#   e2e        full RTL on a fixed or free input domain, or a sign box
 #
 # Not run by its author: JasperGold was not available where this was written.
 # Commands that may differ between Jasper releases are wrapped so that a
@@ -122,6 +122,27 @@ switch -- $kind {
                 error "Missing DUT ROM rtl/common/fn/tables/$rom.mem."
             }
         }
+        set sign_box [zeta_int_env ZETA_SIGN_BOX 0]
+        set symbolic_box [zeta_int_env ZETA_SYMBOLIC_BOX 0]
+        foreach {name value} [list ZETA_SIGN_BOX $sign_box ZETA_SYMBOLIC_BOX $symbolic_box] {
+            if {$value ni {0 1}} {
+                error "$name must be 0 or 1, got '$value'"
+            }
+        }
+        if {$symbolic_box} {
+            if {$sign_box} {
+                error "Select either ZETA_SYMBOLIC_BOX or ZETA_SIGN_BOX"
+            }
+            foreach name {
+                ZETA_SIGMA_LO ZETA_SIGMA_HI ZETA_T_LO ZETA_T_HI ZETA_ENTRY_ROWS
+                ZETA_EXPECT_RE ZETA_EXPECT_IM ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM
+            } {
+                if {[zeta_env $name ""] ne ""} {
+                    error "$name cannot be set with ZETA_SYMBOLIC_BOX=1"
+                }
+            }
+            lappend defines +define+ZETA_SYMBOLIC_BOX=1
+        }
         set eps_exp [zeta_int_env ZETA_EPS_EXP -16]
         lappend defines "+define+ZETA_EPS_EXP=$eps_exp"
         lappend defines "+define+ZETA_EPS_FROM_RE_ONEHALF_EXP=[zeta_int_env ZETA_EPS_FROM_RE_ONEHALF_EXP $eps_exp]"
@@ -136,19 +157,41 @@ switch -- $kind {
             }
             lappend defines +define+ZETA_ENTRY_ROWS=$entry_rows
         }
-        set bounds {}
-        foreach {name default} {
-            ZETA_SIGMA_LO 32'h00000001 ZETA_SIGMA_HI 32'h0000ffff
-            ZETA_T_LO 32'h00000000 ZETA_T_HI 32'h7fffffff
-        } {
-            set literal [zeta_env $name $default]
-            lappend bounds [zeta_hex_value $name $literal 32]
-            lappend defines "+define+$name=$literal"
+        if {!$symbolic_box} {
+            set bounds {}
+            foreach {name default} {
+                ZETA_SIGMA_LO 32'h00000001 ZETA_SIGMA_HI 32'h0000ffff
+                ZETA_T_LO 32'h00000000 ZETA_T_HI 32'h7fffffff
+            } {
+                set literal [zeta_env $name $default]
+                lappend bounds [zeta_hex_value $name $literal 32]
+                lappend defines "+define+$name=$literal"
+            }
+            lassign $bounds sigma_lo sigma_hi t_lo t_hi
+            if {$sigma_lo < 1 || $sigma_lo > $sigma_hi || $sigma_hi > 65535 ||
+                $t_lo > $t_hi || $t_hi > 2147483647} {
+                error "The input box must lie in the legal Q16.16 domain with ordered bounds"
+            }
         }
-        lassign $bounds sigma_lo sigma_hi t_lo t_hi
-        if {$sigma_lo < 1 || $sigma_lo > $sigma_hi || $sigma_hi > 65535 ||
-            $t_lo > $t_hi || $t_hi > 2147483647} {
-            error "The input box must lie in the legal Q16.16 domain with ordered bounds"
+        if {$sign_box} {
+            if {$sigma_lo >= $sigma_hi || $t_lo >= $t_hi || ($sigma_lo + $sigma_hi) % 2} {
+                error "ZETA_SIGN_BOX needs ZETA_SIGMA_LO < ZETA_SIGMA_HI with an even sum and ZETA_T_LO < ZETA_T_HI"
+            }
+            if {[zeta_env ZETA_EXPECT_RE ""] ne "" || [zeta_env ZETA_EXPECT_IM ""] ne ""} {
+                error "Use ZETA_BOX_EXPECT_RE/IM, not ZETA_EXPECT_RE/IM, with ZETA_SIGN_BOX"
+            }
+            lappend defines +define+ZETA_SIGN_BOX=1
+            if {([zeta_env ZETA_BOX_EXPECT_RE ""] eq "") != ([zeta_env ZETA_BOX_EXPECT_IM ""] eq "")} {
+                error "Set both ZETA_BOX_EXPECT_RE and ZETA_BOX_EXPECT_IM, or neither"
+            }
+            foreach name {ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM} {
+                set literal [zeta_env $name ""]
+                if {$literal eq ""} continue
+                zeta_hex_value $name $literal 522
+                lappend defines "+define+$name=$literal"
+            }
+        } elseif {[zeta_env ZETA_BOX_EXPECT_RE ""] ne "" || [zeta_env ZETA_BOX_EXPECT_IM ""] ne ""} {
+            error "ZETA_BOX_EXPECT_RE/IM need ZETA_SIGN_BOX=1"
         }
         if {([zeta_env ZETA_EXPECT_RE ""] eq "") != ([zeta_env ZETA_EXPECT_IM ""] eq "")} {
             error "Set both ZETA_EXPECT_RE and ZETA_EXPECT_IM, or neither"

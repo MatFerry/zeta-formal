@@ -1,9 +1,10 @@
 # Euler–Maclaurin compositional checks
 
 This suite checks the RTL controller, the datapath-unit handshakes, the MPF
-magnitude comparator, and the original near-half assertion on selected
-end-to-end inputs. Use [the full-domain experiment](../euler_maclaurin/README.md)
-for the released-input check.
+magnitude comparator, the original near-half assertion on selected inputs,
+and opposite-direction hits on the Q16.16 grid. The
+[full-domain magnitude experiment](../euler_maclaurin/README.md) releases the
+inputs for the original near-half assertion.
 
 Status: no case of this suite has been run in JasperGold by anyone, and
 `run.tcl`, `run_suite.tcl`, and `summarize.py` have never seen real Jasper
@@ -16,12 +17,14 @@ output. The table says what each case is designed to check. See
 | `units` | JasperGold | Datapath completion contract under single-flight stimulus |
 | `mag` | JasperGold | Equivalence of the Z64 magnitude checker and a bit-vector reference |
 | `lean` | Lean 4.36.0 | Exact magnitude comparison in a finite-width model of the decoded MPF datapath |
-| `e2e` | JasperGold | Packed RTL results, reachable small magnitudes, and the near-half assertion on a point or input window |
+| `e2e` | JasperGold | Packed RTL results and the near-half assertion on points and windows, plus fixed and symbolic opposite-direction boxes |
 
 `units` stands for the kinds `unit_mul`, `unit_add`, and `unit_npow`. The
 manifest names its cases `ctrl_proof`, `ctrl_small`, `unit_mul`, `unit_add`,
 `unit_npow`, `mag_equiv`, `mag_unnormalized`, `pt_z<zero>_t<t_raw>_m<steps>`
-or `_p<steps>` for a point, and `win_z<zero>_t<t_raw>_w<steps>` for a window.
+or `_p<steps>` for a point, `win_z<zero>_t<t_raw>_w<steps>` for a window,
+`box_z<zero>_t<t_raw>_s<steps>` for a fixed sign box, and `box_symbolic` for
+the released sign box.
 `lean` is a separate build. The Jasper suite and `summarize.py` do not
 include it.
 
@@ -29,13 +32,13 @@ include it.
 
 From the repository root on the Jasper launch host, generate the ROMs and
 manifest. Python needs `mpmath`. Versions 3.9.6 and 3.11 were tried, and
-`pyproject.toml` asks for 3.11. This example starts with points and windows
-near the first zero.
-Omit `--zeros 1` to include the default sweep through zero 50.
+`pyproject.toml` asks for 3.11. This example runs the fixed first-zero box
+before the released symbolic box in the same session, along with the
+controller, unit, and magnitude cases.
 
 ```sh
 python3 formal/euler_maclaurin/gen_tables.py
-python3 formal/em_compositional/gen_jobs.py --zeros 1
+python3 formal/em_compositional/gen_jobs.py --zeros 0 --window-zeros 0 --box-zeros 1 --symbolic-box
 session_dir=$(mktemp -d "$PWD/sim_build/zeta_compositional/session.XXXXXXXX")
 ZETA_RESULTS_DIR="$session_dir/results" \
     jg -batch formal/em_compositional/run_suite.tcl -proj "$session_dir/jgproject"
@@ -59,10 +62,14 @@ analysis-region outcomes stay open.
 Read the native Jasper CSV or log if the TSV query is unavailable in your
 Jasper version. Add `-v` to print all rows.
 
-Use `--zeros 0 --window-zeros 0` to run the controller, unit, and magnitude
-checks. `--offsets` changes the number of sigma steps on either side of
-one half, and `--window` changes the half-width in steps of each symbolic
-sigma window.
+Use `--zeros 0 --window-zeros 0 --box-zeros 0` to run the controller, unit,
+and magnitude checks. `--zeros 1 --window-zeros 1` also includes points and a
+window near zero 1. `--offsets` changes the number of sigma steps on either
+side of one half, and `--window` sets the half-width of each symbolic sigma
+window. `--box-zeros` (default 1) adds a fixed sign box for each of the
+first zeros, and `--box-sigma` sets the fixed box half-width in sigma steps.
+`--symbolic-box` appends one released box with a one-step half-width and the
+full entry ROM.
 `--eps-exp` sets the output threshold exponent of the end-to-end cases and
 of the two magnitude cases, and `--sigma-eps-exp` sets the end-to-end sigma
 tolerance exponent. Both default to `-16`.
@@ -86,11 +93,18 @@ ZETA_KIND=ctrl jg -batch formal/em_compositional/run.tcl -proj /tmp/zeta_ctrl
 | `ZETA_MAG_ASSUME_NORMALIZED` | `1` (default) for the normalized magnitude check, `0` for the unrestricted one |
 | `ZETA_SIGMA_LO/HI`, `ZETA_T_LO/HI` | Inclusive `e2e` box bounds, as sized 32-bit hex literals |
 | `ZETA_EXPECT_RE/IM`, `ZETA_ENTRY_ROWS`, `ZETA_RESET_ZERO` | Optional packed golden result, ROM slice size, and zero-initialized unreset registers for `e2e` |
+| `ZETA_SIGN_BOX`, `ZETA_BOX_EXPECT_RE/IM` | `1` selects a fixed `e2e` sign box with optional golden words for its six requests, as 522-bit hex literals |
+| `ZETA_SYMBOLIC_BOX` | `1` selects an `e2e` sign box with symbolic center sigma and lower height, using the full ROM |
 | `ZETA_EPS_EXP`, `ZETA_EPS_FROM_RE_ONEHALF_EXP` | Output threshold exponent for `mag` and `e2e`, default `-16`, and sigma tolerance exponent for `e2e`, defaults to `ZETA_EPS_EXP` |
+
+For a single symbolic case, set `ZETA_KIND=e2e` and `ZETA_SYMBOLIC_BOX=1`.
+The symbolic mode uses its own anchor bounds. Fixed bounds, golden words, and
+ROM slices are accepted in the fixed modes.
 
 In a suite run `jobs.tsv` supplies `ZETA_KIND`, `ZETA_JOB`, the `ctrl`
 bounds, `ZETA_MAG_ASSUME_NORMALIZED`, the box bounds, `ZETA_ENTRY_ROWS`,
-both epsilon exponents, and `ZETA_EXPECT_RE/IM` for every case. Values of
+both epsilon exponents, `ZETA_EXPECT_RE/IM`, and the sign-box settings for
+every case. Values of
 these exported in the shell are ignored during the suite. Change them with
 the `gen_jobs.py` options. The other variables apply to every case.
 
@@ -157,12 +171,12 @@ from the export or a checker has nothing to check. The checkers confirm
 that the exported proofs type-check. They accept any axiom, so the axiom
 check is the one in the build.
 
-**End to end.** The harness asserts `ap_small_implies_near_half`, the
-near-half property, together with `ap_result_has_request`,
-`ap_rom_covers_request`, `ap_flags_clear`, `ap_result_normalized`, and for a
-fixed point `ap_matches_golden`. Its driver requests again in the cycle a
+**End to end.** The harness checks request/result association, ROM bounds,
+arithmetic flags, and output normalization. The legacy cases also check
+`ap_small_implies_near_half`, and a fixed point can check the packed golden
+result with `ap_matches_golden`. The driver requests again in the cycle a
 result arrives and never stalls a stream, so it explores one host timing.
-Stalls and idle gaps are the business of the `ctrl` case.
+The `ctrl` case covers stalls and idle gaps.
 
 The selected points are the Q16.16 grid points next to zeros 1 through 50
 where an mpmath scan found `abs(zeta(0.5 + i*t)) < 2**-16`. There are 57
@@ -206,6 +220,64 @@ the 2026-11-27 review reported `sigma_raw=0x00008002`, `t_raw=0x1B5D1018`
 giving `abs(Z) = 0.829 * 2**-16` in mpmath, the bit-true model, and an RTL
 simulation of 115,443 cycles. That run was not repeated independently.
 
+**Fixed sign boxes.** The generator picks two adjacent Q16.16 heights around
+an mpmath estimate of a zero and centers the box at sigma one half. The
+default width is one raw step on each side of the center. The driver makes
+six requests in order, low and high sigma at the lower height, low and high
+sigma at the upper height, then center sigma at both heights. A pair passes
+the opposite-direction test when `Re(a * conj(b)) < 0`. This is an angle
+greater than 90 degrees, computed exactly on the packed finite RTL outputs.
+
+- `ap_opposite_across_sigma`: at both t rows, the two corners point the
+  opposite way.
+- `ap_opposite_across_t` checks the pair on the center column.
+- `ap_box_matches_golden` compares all six results with the bit-true model,
+  and `cp_box_done` covers the end of the sixth result.
+
+An earlier version checked that Re(zeta) changes sign across sigma and
+Im(zeta) across t. Near a zero zeta is about `zeta'(rho)` times the offset,
+so which component changes sign depends on the phase of `zeta'(rho)`: in
+mpmath both held at only 10 of the first 50 zeros, and a finer sigma step
+or a taller box only traded one for the other. The opposite-direction test
+held at all 50 in the numerical comparison. The generator computes each
+Jasper expectation from the six bit-true model outputs.
+
+Because the driver stops, a box case has a finite horizon: about six times
+the single-request latency (53,448 cycles at zero 1), after which the
+harness is idle. At the default tolerances the zero-1 box also fails
+`ap_small_implies_near_half` at its corners, as the point cases do.
+
+**Symbolic sign box.** The same driver takes two free 32-bit Q16.16 words,
+`sigma_raw` as the center and `t_raw` as the lower height. It samples them
+once and uses them for all six transactions, with heights `t_raw` and
+`t_raw + 1` and sigma offsets `-1`, `0`, and `+1` in raw units. Legal anchors
+are `2 <= sigma_raw <= 0x0000FFFE` and `0 <= t_raw <= 0x7FFFFFFE`, so all six
+points are legal. Both coordinates stay free for the released assertion.
+
+- `ap_symbolic_box_completes` checks that six results arrive within
+  3,324,480 cycles of starting the box after reset. The budget allows
+  `7000 + 60*N_MAX` cycles per request. `ap_symbolic_box_request_order`
+  checks the request/result accounting. These are separate proof obligations
+  alongside the direction check.
+- `ap_opposite_box_centered` asks whether every completed legal box passing
+  all three direction tests has center sigma `0x00008000`. The manifest
+  records either a proof or a counterexample as an observed result. A
+  counterexample gives an off-center box and its six packed RTL outputs.
+- `cp_first_zero_box` requires completion and all three direction tests at
+  center `0x00008000` and lower height `0x000E227D`. The upper height is
+  `0x000E227E`. The cover gives a concrete trace for the predicate.
+
+Allow about 53,450 cycles plus reset and sampling margin for the first-zero
+cover. At the highest legal heights, six transactions can take over three
+million cycles. A trace cap intended for one point can leave this case open.
+
+These are properties of the finite RTL grid. A zero-existence claim for an
+interval would require a certified sign change of the real Hardy `Z`
+function. For the exact zeta function on the critical line, the complex dot
+product also contains the cosine of the Hardy phase difference. Connecting
+the packed result to a sign change requires a positive phase cosine and a
+bound on numerical error that preserves the sign.
+
 ## Open-source pre-check
 
 The controller, unit, and magnitude cases also run in SymbiYosys with the
@@ -231,7 +303,7 @@ failed the induction step. `h_tail_count_legal` closes that gap.
 ## Verification history
 
 No JasperGold run exists for any case, the launch-reset edits and the
-single-session suite included.
+single-session suite included. The symbolic box has had source review only.
 
 The author of the harness recorded Slang elaboration and directed Verilator
 runs on the RTL before the reset fix. No logs or scripts were kept.
@@ -253,6 +325,12 @@ repository.
   under [Reading the results](#reading-the-results) for the upstream and the
   current RTL.
 - `lake build` and both checker replays succeeded.
+- 2026-11-28: sign boxes at zeros 1, 4 and 14 replayed in Verilator with
+  golden words and sigma tolerance `2**-15` fired nothing. A cell 13 steps
+  below zero 1 fired both opposite-direction assertions, and a flipped
+  golden bit fired `ap_box_matches_golden`. `points_opposite` agreed with
+  exact rational arithmetic on 180,000 vectors, including exactly
+  cancelling products and exponent gaps around 128.
 - `oss/run.sh` passed in 58 s: controller k-induction, unit contracts by
   PDR and k-induction, and the unit covers. With the strobe resets removed
   from `euler_maclaurin_top` the controller proof failed in the base case.

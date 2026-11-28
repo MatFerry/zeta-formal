@@ -7,6 +7,7 @@ set suite_keys {
     ZETA_KIND ZETA_JOB ZETA_CTRL_N_BOUND ZETA_CTRL_M_BOUND ZETA_MAG_ASSUME_NORMALIZED
     ZETA_SIGMA_LO ZETA_SIGMA_HI ZETA_T_LO ZETA_T_HI ZETA_ENTRY_ROWS
     ZETA_EPS_EXP ZETA_EPS_FROM_RE_ONEHALF_EXP ZETA_EXPECT_RE ZETA_EXPECT_IM
+    ZETA_SIGN_BOX ZETA_SYMBOLIC_BOX ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM
 }
 set suite_manifest [file join $suite_input_dir jobs.tsv]
 set suite_expected [file join $suite_input_dir expected.tsv]

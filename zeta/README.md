@@ -47,8 +47,8 @@ contain the tables.
 - [`formal/euler_maclaurin/`](formal/euler_maclaurin/README.md): the full-domain JasperGold
   experiment on the near-half assertion.
 - [`formal/em_compositional/`](formal/em_compositional/README.md): controller, unit-contract,
-  magnitude-comparator and selected end-to-end cases for JasperGold, plus a Lean 4 proof of
-  the magnitude comparison.
+  magnitude-comparator and end-to-end cases for JasperGold, including fixed and symbolic
+  opposite-direction boxes, plus a Lean 4 proof of the magnitude comparison.
 
 Each README records what has and has not been run; JasperGold results are not claimed here.
 The parts that need no JasperGold licence run from the repository root:

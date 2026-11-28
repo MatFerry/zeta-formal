@@ -87,7 +87,8 @@ def test_manifest_fields_are_accepted_by_run_suite(
         assert all(fields.values())
         assert re.fullmatch(r"[A-Za-z0-9_.-]+", fields["ZETA_JOB"])
         names.append(fields["ZETA_JOB"])
-    assert len(names) == len(set(names)) == 7 + 2 * 3 + 2
+    # fixed cases, three points per listed t, two windows, one sign box
+    assert len(names) == len(set(names)) == 7 + 2 * 3 + 2 + 1
     expected = [line.split("\t") for line in (tmp_path / "expected.tsv").read_text().splitlines()]
     assert {job for job, _prop, _outcome in expected} == set(names)
     assert {outcome for _job, _prop, outcome in expected} <= {

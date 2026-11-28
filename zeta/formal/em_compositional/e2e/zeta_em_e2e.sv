@@ -10,7 +10,17 @@
 //   - ap_matches_golden compares the packed output to the bit-true Python
 //     output at a fixed input;
 //   - ap_flags_clear checks sticky flags, and ap_result_normalized checks
-//     the mantissas of finite, nonzero results.
+//     the mantissas of finite, nonzero results;
+//   - ZETA_SIGN_BOX=1 evaluates six points in a fixed box: four corners (SIGMA_LO,
+//     T_LO), (SIGMA_HI, T_LO), (SIGMA_LO, T_HI), (SIGMA_HI, T_HI), and the
+//     two points (SIGMA_MID, T_LO), (SIGMA_MID, T_HI) on the middle column,
+//     SIGMA_MID = (SIGMA_LO + SIGMA_HI) / 2. It checks the exact packed-word
+//     dot product Re(a * conj(b)) < 0 across each row and the middle column.
+//     ZETA_BOX_EXPECT_RE/IM optionally supply all six golden results.
+//   - ZETA_SYMBOLIC_BOX=1 samples the raw ports once after reset as the center
+//     sigma and lower t. It evaluates the same six positions at center +/-
+//     one sigma step and at t and t+1, then checks the chosen center if all
+//     three dot products are negative. The test concerns the RTL endpoints.
 `ifndef ZETA_SIGMA_LO
   `define ZETA_SIGMA_LO 32'h0000_0001
 `endif
@@ -28,6 +38,20 @@
 `endif
 `ifndef ZETA_EPS_FROM_RE_ONEHALF_EXP
   `define ZETA_EPS_FROM_RE_ONEHALF_EXP EPS_EXP
+`endif
+`ifndef ZETA_SIGN_BOX
+  `define ZETA_SIGN_BOX 0
+`endif
+`ifndef ZETA_SYMBOLIC_BOX
+  `define ZETA_SYMBOLIC_BOX 0
+`endif
+// Six packed words per component, request r in bits [87*r +: 87].
+`ifdef ZETA_BOX_EXPECT_RE
+  `define ZETA_HAS_BOX_EXPECT 1
+`else
+  `define ZETA_HAS_BOX_EXPECT 0
+  `define ZETA_BOX_EXPECT_RE '0
+  `define ZETA_BOX_EXPECT_IM '0
 `endif
 `ifdef ZETA_EXPECT_RE
   `define ZETA_HAS_EXPECT 1
@@ -54,7 +78,12 @@ module zeta_em_e2e #(
     parameter int EPS_FROM_RE_ONEHALF_EXP = `ZETA_EPS_FROM_RE_ONEHALF_EXP,
     parameter bit HAS_EXPECT = `ZETA_HAS_EXPECT,
     parameter logic [86:0] EXPECT_RE = `ZETA_EXPECT_RE,
-    parameter logic [86:0] EXPECT_IM = `ZETA_EXPECT_IM
+    parameter logic [86:0] EXPECT_IM = `ZETA_EXPECT_IM,
+    parameter bit SIGN_BOX = `ZETA_SIGN_BOX,
+    parameter bit HAS_BOX_EXPECT = `ZETA_HAS_BOX_EXPECT,
+    parameter logic [6*87-1:0] BOX_EXPECT_RE = `ZETA_BOX_EXPECT_RE,
+    parameter logic [6*87-1:0] BOX_EXPECT_IM = `ZETA_BOX_EXPECT_IM,
+    parameter bit SYMBOLIC_BOX = `ZETA_SYMBOLIC_BOX
 ) (
     input logic clk,
     input logic rst_n,
@@ -83,6 +112,12 @@ module zeta_em_e2e #(
   localparam logic [58:0] N_FACTOR = 59'h46f057ef67cc9a1;
   localparam bit SIGMA_FIXED = SIGMA_LO == SIGMA_HI;
   localparam bit T_FIXED = T_LO == T_HI;
+  localparam int SIGN_BIT = WIDTH + EXPW;
+  localparam int ZERO_BIT = WIDTH + EXPW + 1;
+  localparam int SPECIAL_BIT = WIDTH + EXPW + 2;
+  localparam logic [31:0] SIGMA_MID = (SIGMA_LO + SIGMA_HI) / 2;
+  localparam int BOX_REQUESTS = 6;
+  localparam bit BOX_MODE = SIGN_BOX || SYMBOLIC_BOX;
 
   function automatic int msb_index(input logic [63:0] value);
     int index;
@@ -157,28 +192,113 @@ module zeta_em_e2e #(
   logic [BERN_COUNT_W-1:0] bern_count;
   logic [95:0] lnn_fx;
   logic [135:0] lnn2pi;
-  logic pending, below_eps;
+  logic pending, result_matches_pending;
+  logic below_eps;
   logic [31:0] sigma_latched, sigma_delta_raw;
+  // Sign box bookkeeping: requests issued, results received, the six results.
+  logic [2:0] box_requests, box_results;
+  logic [MPW-1:0] box_re [0:BOX_REQUESTS-1];
+  logic [MPW-1:0] box_im [0:BOX_REQUESTS-1];
+  logic box_configured, box_result_matches, box_done;
+  logic opposite_t_lo, opposite_t_hi, opposite_mid;
 
-  assign start_valid = rst_n && start_ready;
+  assign start_valid = rst_n && start_ready && box_configured &&
+                       (!BOX_MODE || box_requests < 3'(BOX_REQUESTS)) &&
+                       (!SYMBOLIC_BOX || !pending || (out_valid && box_result_matches));
   assign accepted = start_valid && start_ready;
 
   a_legal_q16: assume property (@(posedge clk) disable iff (!rst_n)
-      accepted |-> (sigma_raw > 32'd0 && sigma_raw < 32'd65536 && !t_raw[31]));
+      !SYMBOLIC_BOX && accepted |->
+          (sigma_raw > 32'd0 && sigma_raw < 32'd65536 && !t_raw[31]));
   a_input_box: assume property (@(posedge clk) disable iff (!rst_n)
-      accepted |-> (sigma_raw >= SIGMA_LO && sigma_raw <= SIGMA_HI &&
-                    t_raw >= T_LO && t_raw <= T_HI));
+      !SYMBOLIC_BOX && accepted |->
+          (sigma_raw >= SIGMA_LO && sigma_raw <= SIGMA_HI && t_raw >= T_LO && t_raw <= T_HI));
 
   // A fixed input is a constant so that its whole cone folds at elaboration.
-  if (SIGMA_FIXED) begin : sigma_const
-    assign sigma_input = SIGMA_LO;
-  end else begin : sigma_free
-    assign sigma_input = sigma_raw;
-  end
-  if (T_FIXED) begin : t_const
-    assign t_input = T_LO;
-  end else begin : t_free
-    assign t_input = t_raw;
+  if (BOX_MODE) begin : box_inputs
+    logic [31:0] sigma_lo, sigma_hi, sigma_mid, t_lo, t_hi;
+
+    if (SYMBOLIC_BOX) begin : symbolic_box
+      // Per-request allowance above the Z64 controller's 55 cycles per
+      // power-sum term and its fixed setup and tail latency. The extra
+      // cycles include selecting the box and storing the final result.
+      localparam int BOX_CYCLE_LIMIT = BOX_REQUESTS * (7000 + 60 * N_MAX);
+      localparam int BOX_AGE_W = $clog2(BOX_CYCLE_LIMIT + 1);
+      localparam logic [31:0] FIRST_ZERO_T_LO = 32'h000e_227d;
+      logic [31:0] center_sigma, lower_t;
+      logic [BOX_AGE_W-1:0] box_age;
+      logic opposite_box;
+
+      if (SIGN_BOX || HAS_EXPECT || HAS_BOX_EXPECT || ENTRY_ROWS != N_MAX + 1) begin : box_misuse
+        $error("ZETA_SYMBOLIC_BOX requires the full entry table and no fixed box or golden words");
+      end
+
+      // Selection happens on the first active clock, ahead of the first DUT
+      // request. Both raw inputs are free on every later clock.
+      a_symbolic_box_inputs: assume property (@(posedge clk) disable iff (!rst_n)
+          !box_configured |->
+              sigma_raw >= 32'd2 && sigma_raw <= 32'h0000_fffe && t_raw <= 32'h7fff_fffe);
+
+      always_ff @(posedge clk) begin
+        if (!rst_n) begin
+          box_configured <= 1'b0;
+          center_sigma <= '0;
+          lower_t <= '0;
+          box_age <= '0;
+        end else begin
+          if (!box_configured) begin
+            box_configured <= 1'b1;
+            center_sigma <= sigma_raw;
+            lower_t <= t_raw;
+          end
+          if (!box_done && box_age < BOX_AGE_W'(BOX_CYCLE_LIMIT)) begin
+            box_age <= box_age + 1'b1;
+          end
+        end
+      end
+
+      assign sigma_lo = center_sigma - 32'd1;
+      assign sigma_hi = center_sigma + 32'd1;
+      assign sigma_mid = center_sigma;
+      assign t_lo = lower_t;
+      assign t_hi = lower_t + 32'd1;
+      assign opposite_box = opposite_t_lo && opposite_t_hi && opposite_mid;
+
+      ap_symbolic_box_request_order: assert property (@(posedge clk) disable iff (!rst_n)
+          accepted |-> box_requests < 3'(BOX_REQUESTS) &&
+              ((box_requests == box_results && !pending && !out_valid) ||
+               (out_valid && box_result_matches)));
+      ap_box_six_results: assert property (@(posedge clk) disable iff (!rst_n)
+          out_valid |-> box_result_matches);
+      ap_symbolic_box_completes: assert property (@(posedge clk) disable iff (!rst_n)
+          !box_done |-> box_age < BOX_AGE_W'(BOX_CYCLE_LIMIT));
+      ap_opposite_box_centered: assert property (@(posedge clk) disable iff (!rst_n)
+          box_done && opposite_box |-> center_sigma == SIGMA_HALF);
+      cp_box_done: cover property (@(posedge clk) disable iff (!rst_n)
+          box_done);
+      cp_first_zero_box: cover property (@(posedge clk) disable iff (!rst_n)
+          box_done && opposite_box && center_sigma == SIGMA_HALF && lower_t == FIRST_ZERO_T_LO);
+    end else begin : fixed_box
+      if (SIGMA_FIXED || T_FIXED || HAS_EXPECT || (SIGMA_LO + SIGMA_HI) % 2 != 0) begin : box_misuse
+        $error("ZETA_SIGN_BOX needs SIGMA_LO < SIGMA_HI with an even sum, T_LO < T_HI, %s",
+               "and no ZETA_EXPECT_RE/IM");
+      end
+      assign box_configured = 1'b1;
+      assign sigma_lo = SIGMA_LO;
+      assign sigma_hi = SIGMA_HI;
+      assign sigma_mid = SIGMA_MID;
+      assign t_lo = T_LO;
+      assign t_hi = T_HI;
+    end
+
+    // Requests 0-3 are the corners, 4 and 5 the middle column.
+    assign sigma_input = box_requests >= 3'd4 ? sigma_mid :
+                         box_requests[0] ? sigma_hi : sigma_lo;
+    assign t_input = (box_requests >= 3'd4 ? box_requests[0] : box_requests[1]) ? t_hi : t_lo;
+  end else begin : point_or_window
+    assign box_configured = 1'b1;
+    assign sigma_input = SIGMA_FIXED ? SIGMA_LO : sigma_raw;
+    assign t_input = T_FIXED ? T_LO : t_raw;
   end
   assign n_input = host_n(t_input);
 
@@ -256,11 +376,16 @@ module zeta_em_e2e #(
   // The driver requests again in the cycle a result arrives, so pending stays
   // set after the first request. The completed stream counts are what tie a
   // result to the request whose tag is sampled here.
+  assign result_matches_pending = pending && entry_count == n_latched + ENTRY_COUNT_W'(2) &&
+                                  bern_count == BERN_COUNT_W'(M);
   ap_result_has_request: assert property (@(posedge clk) disable iff (!rst_n)
-      out_valid |-> pending && entry_count == n_latched + ENTRY_COUNT_W'(2) &&
-                    bern_count == BERN_COUNT_W'(M));
-  ap_small_implies_near_half: assert property (@(posedge clk) disable iff (!rst_n)
-      out_valid && below_eps |-> {1'b0, sigma_delta_raw} < SIGMA_EPS_RAW);
+      out_valid |-> result_matches_pending);
+  if (!SYMBOLIC_BOX) begin : small_result
+    ap_small_implies_near_half: assert property (@(posedge clk) disable iff (!rst_n)
+        out_valid && below_eps |-> {1'b0, sigma_delta_raw} < SIGMA_EPS_RAW);
+    cp_small_result: cover property (@(posedge clk) disable iff (!rst_n)
+        out_valid && below_eps);
+  end
   // The ln(n) ROM supplies rows 0..N, and inv_np2 is indexed by N - N_MIN.
   ap_rom_covers_request: assert property (@(posedge clk) disable iff (!rst_n)
       accepted |-> int'(n_input) >= N_MIN && int'(n_input) <= N_MAX &&
@@ -279,8 +404,95 @@ module zeta_em_e2e #(
         out_valid |-> z_re == EXPECT_RE && z_im == EXPECT_IM);
   end
 
+  // ---- sign box ------------------------------------------------------------
+  function automatic logic word_is_zero(input logic [MPW-1:0] word);
+    return word[ZERO_BIT] || word[WIDTH-1:0] == '0;
+  endfunction
+
+  function automatic int word_exponent(input logic [MPW-1:0] word);
+    return int'($signed(word[WIDTH+:EXPW]));
+  endfunction
+
+  // Re(a * conj(b)) = a_re*b_re + a_im*b_im < 0, exactly, for finite words.
+  // A word is (-1)^sign * mantissa * 2^(exponent - WIDTH); the two products
+  // are compared on a common scale, so no normalization is assumed.
+  function automatic logic points_opposite(
+      input logic [MPW-1:0] a_re, a_im, b_re, b_im
+  );
+    logic zero_re, zero_im, neg_re, neg_im, re_larger;
+    logic [2*WIDTH-1:0] mag_re, mag_im;
+    logic [4*WIDTH-1:0] scaled_re, scaled_im;
+    int shift;
+    if (a_re[SPECIAL_BIT] || a_im[SPECIAL_BIT] || b_re[SPECIAL_BIT] || b_im[SPECIAL_BIT])
+      return 1'b0;
+    zero_re = word_is_zero(a_re) || word_is_zero(b_re);
+    zero_im = word_is_zero(a_im) || word_is_zero(b_im);
+    neg_re = a_re[SIGN_BIT] ^ b_re[SIGN_BIT];
+    neg_im = a_im[SIGN_BIT] ^ b_im[SIGN_BIT];
+    if (zero_re && zero_im) return 1'b0;
+    if (zero_re) return neg_im;
+    if (zero_im) return neg_re;
+    if (neg_re == neg_im) return neg_re;
+    // Opposite signs: the sum is negative when the negative product is larger.
+    mag_re = (2*WIDTH)'(a_re[WIDTH-1:0]) * (2*WIDTH)'(b_re[WIDTH-1:0]);
+    mag_im = (2*WIDTH)'(a_im[WIDTH-1:0]) * (2*WIDTH)'(b_im[WIDTH-1:0]);
+    shift = word_exponent(a_re) + word_exponent(b_re) - word_exponent(a_im) - word_exponent(b_im);
+    if (shift >= 2*WIDTH) begin
+      re_larger = 1'b1;  // mag_re >= 1 and mag_im < 2^(2*WIDTH)
+    end else if (shift <= -2*WIDTH) begin
+      re_larger = 1'b0;
+    end else begin
+      scaled_re = (4*WIDTH)'(mag_re) << (shift > 0 ? shift : 0);
+      scaled_im = (4*WIDTH)'(mag_im) << (shift < 0 ? -shift : 0);
+      if (scaled_re == scaled_im) return 1'b0;  // the sum is exactly zero
+      re_larger = scaled_re > scaled_im;
+    end
+    return neg_re ? re_larger : !re_larger;
+  endfunction
+
+  assign box_result_matches = box_results < 3'(BOX_REQUESTS) &&
+      (!SYMBOLIC_BOX || (box_requests == box_results + 3'd1 && result_matches_pending));
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      box_requests <= '0;
+      box_results  <= '0;
+      box_done     <= 1'b0;
+    end else if (BOX_MODE) begin
+      if (accepted) box_requests <= box_requests + 3'd1;
+      if (out_valid && box_result_matches) begin
+        box_re[box_results] <= z_re;
+        box_im[box_results] <= z_im;
+        box_results <= box_results + 3'd1;
+        if (box_results == 3'(BOX_REQUESTS - 1)) box_done <= 1'b1;
+      end
+    end
+  end
+
+  assign opposite_t_lo = points_opposite(box_re[0], box_im[0], box_re[1], box_im[1]);
+  assign opposite_t_hi = points_opposite(box_re[2], box_im[2], box_re[3], box_im[3]);
+  assign opposite_mid  = points_opposite(box_re[4], box_im[4], box_re[5], box_im[5]);
+
+  if (SIGN_BOX) begin : sign_box
+    // Negative dot products between SIGMA_LO and SIGMA_HI on both rows.
+    ap_opposite_across_sigma: assert property (@(posedge clk) disable iff (!rst_n)
+        box_done |-> opposite_t_lo && opposite_t_hi);
+    // A negative dot product between T_LO and T_HI on the middle column.
+    ap_opposite_across_t: assert property (@(posedge clk) disable iff (!rst_n)
+        box_done |-> opposite_mid);
+    // The driver stops after the sixth request.
+    ap_box_six_results: assert property (@(posedge clk) disable iff (!rst_n)
+        out_valid |-> box_results < 3'(BOX_REQUESTS));
+    if (HAS_BOX_EXPECT) begin : box_golden
+      ap_box_matches_golden: assert property (@(posedge clk) disable iff (!rst_n)
+          out_valid && box_results < 3'(BOX_REQUESTS) |->
+              z_re == BOX_EXPECT_RE[MPW*box_results +: MPW] &&
+              z_im == BOX_EXPECT_IM[MPW*box_results +: MPW]);
+    end
+    cp_box_done: cover property (@(posedge clk) disable iff (!rst_n)
+        box_done);
+  end
+
   cp_result: cover property (@(posedge clk) disable iff (!rst_n)
       out_valid);
-  cp_small_result: cover property (@(posedge clk) disable iff (!rst_n)
-      out_valid && below_eps);
 endmodule

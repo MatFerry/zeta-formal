@@ -51,8 +51,8 @@ def test_missing_model_is_an_error(gen_jobs: ModuleType, monkeypatch: pytest.Mon
     out: Path = gen_jobs.OUT
     assert not (out / "jobs.tsv").exists()
     # Asking for no model, or for cases that need none, still works.
-    _generate(gen_jobs, monkeypatch, "--zeros", "1", "--no-golden")
-    _generate(gen_jobs, monkeypatch, "--zeros", "0", "--window-zeros", "0")
+    _generate(gen_jobs, monkeypatch, "--zeros", "1", "--no-golden", "--box-zeros", "0")
+    _generate(gen_jobs, monkeypatch, "--zeros", "0", "--window-zeros", "0", "--box-zeros", "0")
 
 
 @pytest.mark.parametrize(
