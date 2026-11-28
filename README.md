@@ -29,7 +29,8 @@ make lint          # Verilator lint + ruff + mypy
 make test          # cocotb tests under Verilator + Python unit tests
 ```
 
-Requires [Verilator](https://verilator.org) >= 5.0 on PATH.
+CI uses Verilator 5.051 from [OSS CAD Suite 2026-07-11](https://github.com/YosysHQ/oss-cad-suite-build/releases/tag/2026-07-11).
+Put that Verilator on PATH to reproduce the lint and simulator jobs locally.
 
 ## Status
 

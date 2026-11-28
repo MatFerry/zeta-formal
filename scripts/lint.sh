@@ -3,9 +3,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "== verilator --lint-only =="
-# -Wno-MULTITOP: the filelist is a library of independent blocks, many tops by design.
-verilator --lint-only -Wall -Wno-MULTITOP -f rtl/filelists/generic-sim.f
+verilator --version
+# Elaborate each independent top so parameter specializations are linted separately.
+for top in skid_buffer limb_mul_ks sincos_turns zeta_engine; do
+    echo "== verilator --lint-only $top =="
+    verilator --lint-only -Wall --top-module "$top" -f rtl/filelists/generic-sim.f
+done
+
+if [[ ${1:-} == --rtl-only ]]; then
+    exit 0
+fi
 
 if command -v verible-verilog-lint >/dev/null 2>&1; then
     echo "== verible-verilog-lint =="

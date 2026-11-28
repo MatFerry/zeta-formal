@@ -8,8 +8,8 @@ jobs:
   python:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - run: uv sync --dev
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -19,15 +19,20 @@ jobs:
   rtl-lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends verilator
-      - run: verilator --lint-only -Wall -f rtl/filelists/generic-sim.f
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: YosysHQ/setup-oss-cad-suite@c7845bc0d335c8076aa22047e85972caa8a916df # v4
+        with:
+          version: '2026-07-11'
+      - run: ./scripts/lint.sh --rtl-only
 
   sim-smoke:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends verilator
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - uses: YosysHQ/setup-oss-cad-suite@c7845bc0d335c8076aa22047e85972caa8a916df # v4
+        with:
+          version: '2026-07-11'
+      - run: verilator --version
       - run: uv sync --dev
       - run: uv run pytest tb -m "not nightly"
