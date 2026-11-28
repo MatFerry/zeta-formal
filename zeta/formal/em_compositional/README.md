@@ -17,7 +17,7 @@ output. The table says what each case is designed to check. See
 | `units` | JasperGold | Datapath completion contract under single-flight stimulus |
 | `mag` | JasperGold | Equivalence of the Z64 magnitude checker and a bit-vector reference |
 | `lean` | Lean 4.36.0 | Exact magnitude comparison in a finite-width model of the decoded MPF datapath |
-| `e2e` | JasperGold | Packed RTL results and the near-half assertion on points and windows, plus fixed and symbolic opposite-direction boxes |
+| `e2e` | JasperGold | Packed RTL results, fixed and symbolic opposite-direction boxes, and one-request off-line error certificates |
 
 `units` stands for the kinds `unit_mul`, `unit_add`, and `unit_npow`. The
 manifest names its cases `ctrl_proof`, `ctrl_small`, `unit_mul`, `unit_add`,
@@ -85,6 +85,7 @@ ZETA_KIND=ctrl jg -batch formal/em_compositional/run.tcl -proj /tmp/zeta_ctrl
 | `ZETA_KIND` | `ctrl`, `unit_mul`, `unit_add`, `unit_npow`, `mag`, or `e2e` for a single case |
 | `ZETA_JOB` | Result file stem for a single case, defaults to the kind |
 | `ZETA_RESULTS_DIR` | Report directory. A suite uses a fresh directory. |
+| `ZETA_MANIFEST_DIR` | Optional directory containing the suite's `jobs.tsv` and `expected.tsv` |
 | `ZETA_PROOFGRID_TCL` | Site ProofGrid Tcl, sourced before each proof |
 | `ZETA_PROVE_TIME_LIMIT` | Optional time limit passed to `prove` |
 | `ZETA_MAX_TRACE_LENGTH`, `ZETA_ENGINE_MODE` | Optional Jasper trace and engine settings. A simulated transaction takes `6598 + 55*N` cycles (8,908 at zero 1, 10,888 at zero 50), and a shorter trace limit cannot reach `out_valid`. |
@@ -103,7 +104,7 @@ ROM slices are accepted in the fixed modes.
 
 In a suite run `jobs.tsv` supplies `ZETA_KIND`, `ZETA_JOB`, the `ctrl`
 bounds, `ZETA_MAG_ASSUME_NORMALIZED`, the box bounds, `ZETA_ENTRY_ROWS`,
-both epsilon exponents, `ZETA_EXPECT_RE/IM`, and the sign-box settings for
+both epsilon exponents, `ZETA_EXPECT_RE/IM`, and the box and certificate settings for
 every case. Values of
 these exported in the shell are ignored during the suite. Change them with
 the `gen_jobs.py` options. The other variables apply to every case.
@@ -277,6 +278,95 @@ function. For the exact zeta function on the critical line, the complex dot
 product also contains the cosine of the Hardy phase difference. Connecting
 the packed result to a sign change requires a positive phase cosine and a
 bound on numerical error that preserves the sign.
+
+## One-request off-line proof and ProofGrid benchmark
+
+This flow checks exact representable vectors `q = (sigma_raw + i*t_raw) / 65536`
+with `1 <= sigma_raw <= 0xFFFF`, `sigma_raw != 0x8000`, and
+`0 <= t_raw <= 0x7FFFFFFF`. It partitions the requested domain into
+rectangles on that integer grid. Each Jasper case accepts one arbitrary
+vector in its rectangle after reset, sends it through the real Euler–Maclaurin
+RTL with the full ROM, and checks the corresponding result. The raw Q16.16
+coordinates are encoded exactly, so this check is about analytic zeta at
+those grid points.
+
+For a rectangle, [python-flint](https://python-flint.readthedocs.io/en/latest/acb.html)
+evaluates analytic zeta with complex ball arithmetic on the entire input
+rectangle. The generator chooses one component (real or imaginary) and one
+sign. After applying that sign, the analytic component lies in an exact
+outward-rounded interval `[a,b]`. Jasper must prove that the same signed RTL
+component lies in `[l,u]`, with exact packed Z64 comparisons. The generator
+rounds `max(u-a, b-l)` upward to a representable dyadic `E`, so both enclosures
+together give a uniform bound `abs(RTL_component - zeta_component) <= E`.
+The strict RTL assertion `abs(RTL_component) > E` then excludes an exact
+zero. This is a bound on a component sufficient for zero exclusion. The
+analytic ball calculation includes the analytic evaluation error, and the
+RTL enclosure is a proof obligation over the full implementation.
+
+The analytic enclosure on each emitted tile already excludes zero. The
+Jasper benchmark measures how efficiently the RTL can be proved to
+implement the corresponding numerical contract. It measures proof coverage
+and time for the same bit-vector problem on two resource configurations.
+
+From the `zeta/` project root on the Jasper host, use Python 3.11 or newer
+with `mpmath` and
+[`python-flint`](https://python-flint.readthedocs.io/en/latest/install.html)
+in the Python environment used by these commands. This small pilot includes
+the representable neighbors of the first zero on both sides of the line.
+The generator splits out `sigma_raw = 0x8000`.
+
+```sh
+python3 formal/euler_maclaurin/gen_tables.py
+bundle="$PWD/sim_build/zeta_compositional/offline-first-zero"
+python3 formal/em_compositional/gen_offline_certs.py \
+    --sigma-lo 0x7ffc --sigma-hi 0x8004 --t-lo 0xe227c --t-hi 0xe227f \
+    --out-dir "$bundle"
+python3 formal/em_compositional/gen_offline_certs.py --check "$bundle"
+```
+
+The certificate bundle contains `jobs.tsv`, `expected.tsv`, and
+`certificates.json` with the rectangle bounds, exact dyadics, and uncovered
+ranges. `--check` verifies the partition, dyadic arithmetic, and match to
+the manifests. Add `--reevaluate` to recompute the analytic enclosures
+with Arb at the recorded precision. Increase `--max-tiles` to allow more
+Arb evaluations or `--precision` to ask for more working bits. Use fresh
+output directories for new bundles. Full grid coverage would require the
+inclusive ranges `0x0001` to `0xFFFF` and `0x00000000` to `0x7FFFFFFF`, with
+all off-line rectangles covered and their Jasper obligations discharged.
+The pilot checks only its specified ranges.
+
+Run the benchmark with two site Tcl files that set only execution resources.
+Configure one worker in the first file and the 80-host ProofGrid pool in the
+second. Keep the proof engines, assumptions, and per-case settings common.
+The launcher starts two sequential Jasper processes, one session per profile.
+ProofGrid dispatches work within the farm session.
+
+```sh
+python3 formal/em_compositional/benchmark_offline.py \
+    --manifest-dir "$bundle" \
+    --one-worker-tcl /absolute/path/to/one-worker.tcl \
+    --eighty-host-tcl /absolute/path/to/proofgrid-80.tcl \
+    --time-limit 30m
+```
+
+To run just the farm proof in one session, use the same bundle directly.
+
+```sh
+session_dir=$(mktemp -d "$PWD/sim_build/zeta_compositional/offline.XXXXXXXX")
+ZETA_MANIFEST_DIR="$bundle" ZETA_RESULTS_DIR="$session_dir/results" \
+    ZETA_PROOFGRID_TCL=/absolute/path/to/proofgrid-80.tcl \
+    jg -batch formal/em_compositional/run_suite.tcl -proj "$session_dir/jgproject"
+python3 formal/em_compositional/summarize.py "$session_dir/results" -v
+```
+
+Use the Jasper or scheduler logs to confirm how many workers actually ran.
+The launcher stores summaries, logs, input hashes, and `comparison.json`
+under `sim_build/zeta_compositional/benchmarks/`. Compare elapsed seconds
+and the rectangles and vectors closed under each profile. A wall-clock
+ratio is reported when both profiles discharge the same manifest. A
+bounded result, timeout, missing result, or unresolved rectangle leaves the
+corresponding domain open. Check `cp_offline_result` for reachability along
+with the completion, association, enclosure, and strict exclusion assertions.
 
 ## Open-source pre-check
 

@@ -2,16 +2,25 @@
 # A case that stops with an error is reported and the remaining cases still
 # run; the script then ends with an error that names the failed cases.
 set suite_script_dir [file normalize [file dirname [info script]]]
-set suite_input_dir [file normalize [file join $suite_script_dir ../../sim_build/zeta_compositional]]
+set suite_default_dir [file normalize [file join $suite_script_dir ../../sim_build/zeta_compositional]]
+set suite_input_dir $suite_default_dir
+if {[info exists ::env(ZETA_MANIFEST_DIR)] && $::env(ZETA_MANIFEST_DIR) ne ""} {
+    set suite_input_dir [file normalize $::env(ZETA_MANIFEST_DIR)]
+}
 set suite_keys {
     ZETA_KIND ZETA_JOB ZETA_CTRL_N_BOUND ZETA_CTRL_M_BOUND ZETA_MAG_ASSUME_NORMALIZED
     ZETA_SIGMA_LO ZETA_SIGMA_HI ZETA_T_LO ZETA_T_HI ZETA_ENTRY_ROWS
     ZETA_EPS_EXP ZETA_EPS_FROM_RE_ONEHALF_EXP ZETA_EXPECT_RE ZETA_EXPECT_IM
     ZETA_SIGN_BOX ZETA_SYMBOLIC_BOX ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM
+    ZETA_CERTIFY_OFFLINE ZETA_CERT_COMPONENT ZETA_CERT_NEGATIVE
+    ZETA_CERT_RTL_LO ZETA_CERT_RTL_HI ZETA_CERT_ERROR
 }
 set suite_manifest [file join $suite_input_dir jobs.tsv]
 set suite_expected [file join $suite_input_dir expected.tsv]
 if {![file isfile $suite_manifest] || ![file isfile $suite_expected]} {
+    if {[info exists ::env(ZETA_MANIFEST_DIR)] && $::env(ZETA_MANIFEST_DIR) ne ""} {
+        error "ZETA_MANIFEST_DIR must contain jobs.tsv and expected.tsv: $suite_input_dir"
+    }
     error "Run python3 formal/em_compositional/gen_jobs.py before sourcing the suite"
 }
 
@@ -47,7 +56,7 @@ if {[dict size $suite_jobs] == 0} {
 if {[info exists ::env(ZETA_RESULTS_DIR)] && $::env(ZETA_RESULTS_DIR) ne ""} {
     set suite_results [file normalize $::env(ZETA_RESULTS_DIR)]
 } else {
-    set suite_results [file join $suite_input_dir results-[pid]]
+    set suite_results [file join $suite_default_dir results-[pid]]
 }
 if {[file exists $suite_results]} {
     error "The suite requires a fresh results directory: $suite_results"
@@ -56,6 +65,19 @@ file mkdir $suite_results
 file copy $suite_manifest $suite_expected $suite_results
 set ::env(ZETA_RESULTS_DIR) $suite_results
 puts "Euler-Maclaurin suite results: $suite_results"
+
+# Keep launch settings fixed across cases, even if a site hook exports variables.
+set suite_run_keys $suite_keys
+set suite_settings {}
+foreach name {
+    ZETA_RESULTS_DIR ZETA_PROOFGRID_TCL ZETA_PROVE_TIME_LIMIT ZETA_MAX_TRACE_LENGTH
+    ZETA_ENGINE_MODE ZETA_ELABORATE_OPTIONS ZETA_RESET_ZERO
+} {
+    lappend suite_run_keys $name
+    if {[info exists ::env($name)]} {
+        dict set suite_settings $name $::env($name)
+    }
+}
 
 proc zeta_suite_run_case {script keys options} {
     set saved {}
@@ -85,7 +107,8 @@ proc zeta_suite_run_case {script keys options} {
 set suite_failed {}
 dict for {name options} $suite_jobs {
     if {[catch {
-        zeta_suite_run_case [file join $suite_script_dir run.tcl] $suite_keys $options
+        zeta_suite_run_case [file join $suite_script_dir run.tcl] $suite_run_keys \
+            [dict merge $suite_settings $options]
     } suite_message]} {
         puts "zeta suite: case '$name' FAILED: $suite_message"
         lappend suite_failed $name

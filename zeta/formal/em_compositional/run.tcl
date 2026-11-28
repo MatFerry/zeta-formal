@@ -8,7 +8,7 @@
 #   unit_add   handshake contract of mpf_add
 #   unit_npow  handshake contract of npow_s_kernel
 #   mag        magnitude checker against the exact reference
-#   e2e        full RTL on a fixed or free input domain, or a sign box
+#   e2e        full RTL on an input domain, a sign box, or an offline tile
 #
 # Not run by its author: JasperGold was not available where this was written.
 # Commands that may differ between Jasper releases are wrapped so that a
@@ -124,15 +124,17 @@ switch -- $kind {
         }
         set sign_box [zeta_int_env ZETA_SIGN_BOX 0]
         set symbolic_box [zeta_int_env ZETA_SYMBOLIC_BOX 0]
-        foreach {name value} [list ZETA_SIGN_BOX $sign_box ZETA_SYMBOLIC_BOX $symbolic_box] {
+        set certify_offline [zeta_int_env ZETA_CERTIFY_OFFLINE 0]
+        foreach {name value} [list ZETA_SIGN_BOX $sign_box ZETA_SYMBOLIC_BOX $symbolic_box \
+                                   ZETA_CERTIFY_OFFLINE $certify_offline] {
             if {$value ni {0 1}} {
                 error "$name must be 0 or 1, got '$value'"
             }
         }
+        if {$sign_box + $symbolic_box + $certify_offline > 1} {
+            error "Select only one of ZETA_SIGN_BOX, ZETA_SYMBOLIC_BOX, and ZETA_CERTIFY_OFFLINE"
+        }
         if {$symbolic_box} {
-            if {$sign_box} {
-                error "Select either ZETA_SYMBOLIC_BOX or ZETA_SIGN_BOX"
-            }
             foreach name {
                 ZETA_SIGMA_LO ZETA_SIGMA_HI ZETA_T_LO ZETA_T_HI ZETA_ENTRY_ROWS
                 ZETA_EXPECT_RE ZETA_EXPECT_IM ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM
@@ -142,6 +144,41 @@ switch -- $kind {
                 }
             }
             lappend defines +define+ZETA_SYMBOLIC_BOX=1
+        }
+        if {$certify_offline} {
+            foreach name {ZETA_SIGMA_LO ZETA_SIGMA_HI ZETA_T_LO ZETA_T_HI} {
+                if {[zeta_env $name ""] eq ""} {
+                    error "$name is required with ZETA_CERTIFY_OFFLINE=1"
+                }
+            }
+            foreach name {
+                ZETA_ENTRY_ROWS ZETA_EXPECT_RE ZETA_EXPECT_IM ZETA_BOX_EXPECT_RE ZETA_BOX_EXPECT_IM
+            } {
+                if {[zeta_env $name ""] ne ""} {
+                    error "$name cannot be set with ZETA_CERTIFY_OFFLINE=1"
+                }
+            }
+            lappend defines +define+ZETA_CERTIFY_OFFLINE=1
+        }
+        foreach name {ZETA_CERT_COMPONENT ZETA_CERT_NEGATIVE ZETA_CERT_RTL_LO ZETA_CERT_RTL_HI ZETA_CERT_ERROR} {
+            set literal [zeta_env $name ""]
+            if {!$certify_offline} {
+                if {$literal ne ""} {
+                    error "$name needs ZETA_CERTIFY_OFFLINE=1"
+                }
+                continue
+            }
+            if {$name in {ZETA_CERT_COMPONENT ZETA_CERT_NEGATIVE}} {
+                if {$literal ni {0 1}} {
+                    error "$name must be 0 or 1 with ZETA_CERTIFY_OFFLINE=1"
+                }
+            } else {
+                set word [zeta_hex_value $name $literal 87]
+                if {$word >= (1 << 84) || ($word & (1 << 63)) == 0} {
+                    error "$name must encode a positive finite normalized Z64 word"
+                }
+            }
+            lappend defines "+define+$name=$literal"
         }
         set eps_exp [zeta_int_env ZETA_EPS_EXP -16]
         lappend defines "+define+ZETA_EPS_EXP=$eps_exp"
@@ -210,6 +247,10 @@ switch -- $kind {
     }
 }
 
+set max_trace_length [zeta_env ZETA_MAX_TRACE_LENGTH ""]
+set engine_mode [zeta_env ZETA_ENGINE_MODE ""]
+set prove_time_limit [zeta_env ZETA_PROVE_TIME_LIMIT ""]
+
 # Fail before the proof, not after it, if the results cannot be stored.
 file mkdir $results_dir
 close [open [file join $results_dir $job.tsv.[pid].tmp] w]
@@ -223,20 +264,19 @@ elaborate -top $top -disable_auto_bbox {*}$elaborate_options {*}[zeta_env ZETA_E
 {*}$reset_command
 
 if {$proofgrid_tcl ne ""} {
-    puts "Loading ProofGrid setup from $proofgrid_tcl"
-    source $proofgrid_tcl
+    puts "Loading ProofGrid setup [file tail $proofgrid_tcl]"
+    uplevel #0 [list source $proofgrid_tcl]
 }
 # In simulation out_valid follows the accepted request after 6598 + 55*N
 # cycles: 8,908 at N = 42 (zero 1) and 10,888 at N = 78 (zero 50).
 # Formal trace length also depends on reset and sampling in Jasper.
-if {[zeta_env ZETA_MAX_TRACE_LENGTH ""] ne ""} {
-    set_max_trace_length [zeta_env ZETA_MAX_TRACE_LENGTH ""]
+if {$max_trace_length ne ""} {
+    set_max_trace_length $max_trace_length
 }
-if {[zeta_env ZETA_ENGINE_MODE ""] ne ""} {
-    set_engine_mode [zeta_env ZETA_ENGINE_MODE ""]
+if {$engine_mode ne ""} {
+    set_engine_mode $engine_mode
 }
 set prove_options {}
-set prove_time_limit [zeta_env ZETA_PROVE_TIME_LIMIT ""]
 if {$prove_time_limit ni {"" none}} {
     set prove_options [list -time_limit $prove_time_limit]
 }

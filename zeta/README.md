@@ -48,7 +48,8 @@ contain the tables.
   experiment on the near-half assertion.
 - [`formal/em_compositional/`](formal/em_compositional/README.md): controller, unit-contract,
   magnitude-comparator and end-to-end cases for JasperGold, including fixed and symbolic
-  opposite-direction boxes, plus a Lean 4 proof of the magnitude comparison.
+  opposite-direction boxes and a one-request off-line certificate benchmark. It also has a
+  Lean 4 proof of the magnitude comparison.
 
 Each README records what has and has not been run; JasperGold results are not claimed here.
 The parts that need no JasperGold licence run from the repository root:

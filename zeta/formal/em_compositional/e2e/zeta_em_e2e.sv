@@ -21,6 +21,9 @@
 //     sigma and lower t. It evaluates the same six positions at center +/-
 //     one sigma step and at t and t+1, then checks the chosen center if all
 //     three dot products are negative. The test concerns the RTL endpoints.
+//   - ZETA_CERTIFY_OFFLINE=1 evaluates one request from an off-line tile and
+//     checks a signed component enclosure and a strict magnitude margin over
+//     the certificate's analytic error bound.
 `ifndef ZETA_SIGMA_LO
   `define ZETA_SIGMA_LO 32'h0000_0001
 `endif
@@ -44,6 +47,24 @@
 `endif
 `ifndef ZETA_SYMBOLIC_BOX
   `define ZETA_SYMBOLIC_BOX 0
+`endif
+`ifndef ZETA_CERTIFY_OFFLINE
+  `define ZETA_CERTIFY_OFFLINE 0
+`endif
+`ifndef ZETA_CERT_COMPONENT
+  `define ZETA_CERT_COMPONENT 0
+`endif
+`ifndef ZETA_CERT_NEGATIVE
+  `define ZETA_CERT_NEGATIVE 0
+`endif
+`ifndef ZETA_CERT_RTL_LO
+  `define ZETA_CERT_RTL_LO '0
+`endif
+`ifndef ZETA_CERT_RTL_HI
+  `define ZETA_CERT_RTL_HI '0
+`endif
+`ifndef ZETA_CERT_ERROR
+  `define ZETA_CERT_ERROR '0
 `endif
 // Six packed words per component, request r in bits [87*r +: 87].
 `ifdef ZETA_BOX_EXPECT_RE
@@ -83,7 +104,13 @@ module zeta_em_e2e #(
     parameter bit HAS_BOX_EXPECT = `ZETA_HAS_BOX_EXPECT,
     parameter logic [6*87-1:0] BOX_EXPECT_RE = `ZETA_BOX_EXPECT_RE,
     parameter logic [6*87-1:0] BOX_EXPECT_IM = `ZETA_BOX_EXPECT_IM,
-    parameter bit SYMBOLIC_BOX = `ZETA_SYMBOLIC_BOX
+    parameter bit SYMBOLIC_BOX = `ZETA_SYMBOLIC_BOX,
+    parameter bit CERTIFY_OFFLINE = `ZETA_CERTIFY_OFFLINE,
+    parameter int CERT_COMPONENT = `ZETA_CERT_COMPONENT,
+    parameter int CERT_NEGATIVE = `ZETA_CERT_NEGATIVE,
+    parameter logic [86:0] CERT_RTL_LO = `ZETA_CERT_RTL_LO,
+    parameter logic [86:0] CERT_RTL_HI = `ZETA_CERT_RTL_HI,
+    parameter logic [86:0] CERT_ERROR = `ZETA_CERT_ERROR
 ) (
     input logic clk,
     input logic rst_n,
@@ -201,8 +228,9 @@ module zeta_em_e2e #(
   logic [MPW-1:0] box_im [0:BOX_REQUESTS-1];
   logic box_configured, box_result_matches, box_done;
   logic opposite_t_lo, opposite_t_hi, opposite_mid;
+  logic offline_can_start;
 
-  assign start_valid = rst_n && start_ready && box_configured &&
+  assign start_valid = rst_n && start_ready && box_configured && offline_can_start &&
                        (!BOX_MODE || box_requests < 3'(BOX_REQUESTS)) &&
                        (!SYMBOLIC_BOX || !pending || (out_valid && box_result_matches));
   assign accepted = start_valid && start_ready;
@@ -380,7 +408,7 @@ module zeta_em_e2e #(
                                   bern_count == BERN_COUNT_W'(M);
   ap_result_has_request: assert property (@(posedge clk) disable iff (!rst_n)
       out_valid |-> result_matches_pending);
-  if (!SYMBOLIC_BOX) begin : small_result
+  if (!SYMBOLIC_BOX && !CERTIFY_OFFLINE) begin : small_result
     ap_small_implies_near_half: assert property (@(posedge clk) disable iff (!rst_n)
         out_valid && below_eps |-> {1'b0, sigma_delta_raw} < SIGMA_EPS_RAW);
     cp_small_result: cover property (@(posedge clk) disable iff (!rst_n)
@@ -402,6 +430,85 @@ module zeta_em_e2e #(
     // Compare the packed output with host/zetafpga/golden/zeta_em.py.
     ap_matches_golden: assert property (@(posedge clk) disable iff (!rst_n)
         out_valid |-> z_re == EXPECT_RE && z_im == EXPECT_IM);
+  end
+
+  if (CERTIFY_OFFLINE) begin : offline_certificate
+    // The upper height bounds N throughout the tile. Allow extra cycles
+    // over the controller's fixed overhead and 55 cycles per sum term.
+    localparam int CYCLE_LIMIT = 7000 + 60 * int'(host_n(T_HI));
+    localparam int AGE_W = $clog2(CYCLE_LIMIT + 1);
+
+    function automatic logic finite_normal_mpf(input logic [MPW-1:0] word);
+      return !word[SPECIAL_BIT] && !word[ZERO_BIT] && word[WIDTH-1];
+    endfunction
+
+    // For normalized nonzero words, bias the signed exponent for unsigned
+    // lexicographic order, then compare mantissas at the same exponent.
+    function automatic logic [WIDTH+EXPW-1:0] magnitude_key(input logic [MPW-1:0] word);
+      return {~word[WIDTH+EXPW-1], word[WIDTH+EXPW-2:0]};
+    endfunction
+
+    if (BOX_MODE || HAS_EXPECT || HAS_BOX_EXPECT || ENTRY_ROWS != N_MAX + 1) begin : incompatible_modes
+      $error("ZETA_CERTIFY_OFFLINE requires the full entry table and no sign box or golden words");
+    end
+    if (SIGMA_LO < 32'd1 || SIGMA_HI > 32'd65535 || SIGMA_LO > SIGMA_HI ||
+        !(SIGMA_HI < SIGMA_HALF || SIGMA_LO > SIGMA_HALF) || T_LO > T_HI || T_HI[31]) begin : invalid_tile
+      $error("ZETA_CERTIFY_OFFLINE requires a legal Q16.16 tile strictly on one side of sigma=0.5");
+    end
+    if ((CERT_COMPONENT != 0 && CERT_COMPONENT != 1) ||
+        (CERT_NEGATIVE != 0 && CERT_NEGATIVE != 1)) begin : invalid_projection
+      $error("ZETA_CERT_COMPONENT and ZETA_CERT_NEGATIVE must be zero or one");
+    end
+    if (!finite_normal_mpf(CERT_RTL_LO) || CERT_RTL_LO[SIGN_BIT] ||
+        !finite_normal_mpf(CERT_RTL_HI) || CERT_RTL_HI[SIGN_BIT] ||
+        !finite_normal_mpf(CERT_ERROR) || CERT_ERROR[SIGN_BIT] ||
+        magnitude_key(CERT_RTL_LO) > magnitude_key(CERT_RTL_HI)) begin : invalid_certificate
+      $error("Offline certificate requires positive normalized MPF values and ordered RTL bounds");
+    end
+
+    logic launched, completed, result_for_request;
+    logic [AGE_W-1:0] age;
+    logic [MPW-1:0] component_word;
+    logic [WIDTH+EXPW-1:0] component_magnitude;
+
+    assign offline_can_start = !launched;
+    assign result_for_request = launched && !completed && result_matches_pending;
+    assign component_word = CERT_COMPONENT == 0 ? z_re : z_im;
+    assign component_magnitude = magnitude_key(component_word);
+
+    always_ff @(posedge clk) begin
+      if (!rst_n) begin
+        launched <= 1'b0;
+        completed <= 1'b0;
+        age <= '0;
+      end else begin
+        if (accepted) launched <= 1'b1;
+        if (out_valid && result_for_request) completed <= 1'b1;
+        if (!completed && age < AGE_W'(CYCLE_LIMIT)) age <= age + 1'b1;
+      end
+    end
+
+    ap_offline_request_legal: assert property (@(posedge clk) disable iff (!rst_n)
+        accepted |-> !launched && sigma_input != SIGMA_HALF &&
+            sigma_input >= SIGMA_LO && sigma_input <= SIGMA_HI &&
+            t_input >= T_LO && t_input <= T_HI);
+    ap_offline_single_result: assert property (@(posedge clk) disable iff (!rst_n)
+        out_valid |-> result_for_request);
+    // Count from reset release so a missing launch also violates completion.
+    ap_offline_completes: assert property (@(posedge clk) disable iff (!rst_n)
+        !completed |-> age < AGE_W'(CYCLE_LIMIT));
+    ap_offline_rtl_enclosure: assert property (@(posedge clk) disable iff (!rst_n)
+        out_valid |-> finite_normal_mpf(component_word) &&
+            component_word[SIGN_BIT] == (CERT_NEGATIVE == 1) &&
+            component_magnitude >= magnitude_key(CERT_RTL_LO) &&
+            component_magnitude <= magnitude_key(CERT_RTL_HI));
+    ap_offline_excludes_zero: assert property (@(posedge clk) disable iff (!rst_n)
+        out_valid |-> finite_normal_mpf(component_word) &&
+            component_magnitude > magnitude_key(CERT_ERROR));
+    cp_offline_result: cover property (@(posedge clk) disable iff (!rst_n)
+        out_valid && result_for_request);
+  end else begin : no_offline_request_limit
+    assign offline_can_start = 1'b1;
   end
 
   // ---- sign box ------------------------------------------------------------
